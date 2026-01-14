@@ -12,30 +12,69 @@
     th,td{border:1px solid #ddd;padding:8px;text-align:left}
     th{background:#f6f8fa}
     #error{color:#a33;margin-top:12px}
+    #controls{margin-top:12px}
+    #actions{margin-top:8px}
   </style>
 </head>
 <body>
   <h1>Google Sheets Viewer</h1>
-  <p>Enter a public Google Spreadsheet ID and optional sheet name, then click Load.</p>
+  <p>Viewer preloaded for sheet <strong>Master_Summary</strong>. You can change the Spreadsheet ID/URL or sheet name if needed.</p>
   <div>
-    <label for="sheetId">Spreadsheet ID:</label>
-    <input id="sheetId" placeholder="e.g. 1AbC..." size="40" />
-    <label for="sheetName">Sheet name:</label>
-    <input id="sheetName" placeholder="Sheet1" size="16" />
+    <label for="sheetId">Spreadsheet ID or URL:</label>
+    <input id="sheetId" placeholder="Spreadsheet ID or full URL" size="60" />
+    <label for="sheetName">Sheet name or gid:</label>
+    <input id="sheetName" placeholder="Sheet name (e.g. Master_Summary) or gid" size="20" />
     <button id="load">Load</button>
   </div>
-  <div id="error" role="alert" aria-live="polite"></div>
+
+  <div id="controls">
+    <div id="error" role="alert" aria-live="polite"></div>
+    <div id="actions" style="display:none">
+      <button id="exportCsv">Export CSV</button>
+      <a id="openSheet" href="#" target="_blank" rel="noopener">Open in Google Sheets</a>
+    </div>
+  </div>
+
   <div id="tableContainer"></div>
 
   <script>
+    // Default spreadsheet and sheet
+    const DEFAULT_SPREADSHEET_ID = '1g6ND7SyBDwJXxy0x4PkPDTujXftgp81AXGLZHN7nHy0';
+    const DEFAULT_SHEET_NAME = 'Master_Summary';
+
+    // Extract spreadsheet ID from a full Google Sheets URL or return input if already an ID
+    function extractSpreadsheetId(input){
+      if(!input) return '';
+      const urlMatch = input.match(/\/d\/([a-zA-Z0-9-_]+)(?:\/|$)/);
+      if(urlMatch) return urlMatch[1];
+      // fallback for share links that include id= parameter
+      const idParam = input.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+      if(idParam) return idParam[1];
+      return input.trim();
+    }
+
+    // Extract gid from URL if present
+    function extractGid(input){
+      if(!input) return '';
+      const gidMatch = input.match(/[?&]gid=(\d+)/);
+      return gidMatch ? gidMatch[1] : '';
+    }
+
     // Helper to fetch public sheet data via Google Visualization API
-    async function fetchSheet(spreadsheetId, sheetName){
-      const sheetParam = sheetName ? '&sheet=' + encodeURIComponent(sheetName) : '';
-      const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json${sheetParam}`;
+    async function fetchSheet(spreadsheetId, sheetNameOrGid){
+      let param = '';
+      if(!sheetNameOrGid) {
+        param = '';
+      } else if(/^\d+$/.test(sheetNameOrGid)){ 
+        // looks like gid (numeric)
+        param = '&gid=' + encodeURIComponent(sheetNameOrGid);
+      } else {
+        param = '&sheet=' + encodeURIComponent(sheetNameOrGid);
+      }
+      const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json${param}`;
       const res = await fetch(url);
       if(!res.ok) throw new Error('Network error: ' + res.status);
       const text = await res.text();
-      // The response is JS that wraps JSON in a function call. Extract the JSON payload.
       const match = text.match(/google\.visualization\.Query\.setResponse\((.*)\);/s);
       if(!match) throw new Error('Unexpected response format from Google Sheets');
       return JSON.parse(match[1]);
@@ -48,8 +87,8 @@
       const thead = document.createElement('thead');
       const tbody = document.createElement('tbody');
 
-      const cols = googleResponse.table.cols || [];
-      const rows = googleResponse.table.rows || [];
+      const cols = (googleResponse && googleResponse.table && googleResponse.table.cols) || [];
+      const rows = (googleResponse && googleResponse.table && googleResponse.table.rows) || [];
 
       // Header
       const trHead = document.createElement('tr');
@@ -63,7 +102,7 @@
       // Rows
       rows.forEach(r => {
         const tr = document.createElement('tr');
-        r.c.forEach(cell => {
+        (r.c || []).forEach(cell => {
           const td = document.createElement('td');
           td.textContent = (cell && cell.v != null) ? cell.v : '';
           tr.appendChild(td);
@@ -74,35 +113,93 @@
       table.appendChild(thead);
       table.appendChild(tbody);
       container.appendChild(table);
+
+      // show actions
+      document.getElementById('actions').style.display = rows.length || cols.length ? 'block' : 'none';
+    }
+
+    function tableToCSV(){
+      const table = document.querySelector('#tableContainer table');
+      if(!table) return '';
+      const rows = Array.from(table.querySelectorAll('tr'));
+      const csv = rows.map(tr => {
+        const cells = Array.from(tr.querySelectorAll('th,td'));
+        return cells.map(td => {
+          let text = td.textContent || '';
+          // escape double quotes
+          text = text.replace(/"/g, '""');
+          if(text.search(/[",\n]/) >= 0) text = '"' + text + '"';
+          return text;
+        }).join(',');
+      }).join('\n');
+      return csv;
+    }
+
+    function downloadCSV(filename){
+      const csv = tableToCSV();
+      if(!csv){ alert('No table to export'); return; }
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'sheet.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     }
 
     document.getElementById('load').addEventListener('click', async () => {
-      const id = document.getElementById('sheetId').value.trim();
-      const sheet = document.getElementById('sheetName').value.trim();
+      const raw = document.getElementById('sheetId').value.trim();
+      const sheetRaw = document.getElementById('sheetName').value.trim();
       const errorEl = document.getElementById('error');
       errorEl.textContent = '';
       document.getElementById('tableContainer').innerHTML = '';
-      if(!id){ errorEl.textContent = 'Please enter a Spreadsheet ID.'; return; }
+      document.getElementById('actions').style.display = 'none';
+
+      if(!raw){ errorEl.textContent = 'Please enter a Spreadsheet ID or URL.'; return; }
       try{
-        const resp = await fetchSheet(id, sheet);
-        if(resp && resp.table && resp.table.rows && resp.table.rows.length){
+        const id = extractSpreadsheetId(raw);
+        const gidFromUrl = extractGid(raw);
+        const sheetParam = sheetRaw || (gidFromUrl ? gidFromUrl : DEFAULT_SHEET_NAME);
+        const resp = await fetchSheet(id, sheetParam);
+        if(resp && resp.table && (resp.table.rows && resp.table.rows.length || resp.table.cols && resp.table.cols.length)){ 
           renderTable(resp);
+          // update Open in Google Sheets link
+          const openLink = document.getElementById('openSheet');
+          openLink.href = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/edit${/^\d+$/.test(sheetParam) ? ('#gid=' + sheetParam) : ('#gid=0&sheet=' + encodeURIComponent(sheetParam))}`;
         } else {
-          document.getElementById('tableContainer').textContent = 'No data found.';
+          document.getElementById('tableContainer').textContent = 'No data found or sheet empty.';
         }
       }catch(err){
         errorEl.textContent = 'Error: ' + err.message;
       }
     });
 
-    // Optional: load sample if hash present (#id=SPREADSHEET_ID&sheet=Sheet1)
+    document.getElementById('exportCsv').addEventListener('click', () => {
+      downloadCSV('Master_Summary.csv');
+    });
+
+    // Auto-fill defaults and auto-load Master_Summary on first load
     (function(){
-      const params = new URLSearchParams(location.hash.replace(/^#/, ''));
-      if(params.get('id')){
-        document.getElementById('sheetId').value = params.get('id');
-        if(params.get('sheet')) document.getElementById('sheetName').value = params.get('sheet');
-        document.getElementById('load').click();
+      const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
+      const urlParam = hashParams.get('url') || hashParams.get('id');
+      const sheetParam = hashParams.get('sheet') || hashParams.get('gid');
+
+      if(urlParam){
+        document.getElementById('sheetId').value = urlParam;
+      } else {
+        document.getElementById('sheetId').value = DEFAULT_SPREADSHEET_ID;
       }
+
+      if(sheetParam){
+        document.getElementById('sheetName').value = sheetParam;
+      } else {
+        document.getElementById('sheetName').value = DEFAULT_SHEET_NAME;
+      }
+
+      // Trigger load automatically
+      setTimeout(() => document.getElementById('load').click(), 250);
     })();
   </script>
 </body>
