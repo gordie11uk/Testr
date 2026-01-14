@@ -1,78 +1,109 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Live Stock Viewer</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Google Sheets Viewer</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 20px;
-      background: #f5f6fa;
-    }
-    h1 {
-      margin-bottom: 10px;
-    }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      background: white;
-    }
-    th, td {
-      border: 1px solid #ddd;
-      padding: 8px;
-      text-align: left;
-    }
-    th {
-      background: #2f3640;
-      color: white;
-    }
-    .status {
-      margin-bottom: 10px;
-      font-size: 0.9em;
-      color: #555;
-    }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:24px}
+    label,input,button{font-size:14px}
+    input{padding:6px;margin-right:8px}
+    table{border-collapse:collapse;margin-top:16px;width:100%}
+    th,td{border:1px solid #ddd;padding:8px;text-align:left}
+    th{background:#f6f8fa}
+    #error{color:#a33;margin-top:12px}
   </style>
 </head>
 <body>
-  <h1>Live Stock Feed</h1>
-  <div class="status" id="status">Waiting for data...</div>
-  <table id="stockTable"></table>
+  <h1>Google Sheets Viewer</h1>
+  <p>Enter a public Google Spreadsheet ID and optional sheet name, then click Load.</p>
+  <div>
+    <label for="sheetId">Spreadsheet ID:</label>
+    <input id="sheetId" placeholder="e.g. 1AbC..." size="40" />
+    <label for="sheetName">Sheet name:</label>
+    <input id="sheetName" placeholder="Sheet1" size="16" />
+    <button id="load">Load</button>
+  </div>
+  <div id="error" role="alert" aria-live="polite"></div>
+  <div id="tableContainer"></div>
 
   <script>
-    const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQTANvjv2pU-8CAAFiODQM0HHjXrEOK7ZABKBAypTvSzOiv3Ro-MMUz23iIx-QxL00wwanOrVSPNT9A/pub?gid=77836660&single=true&output=csv";
-    const REFRESH_INTERVAL_MS = 3000; // 3 seconds
-
-    async function fetchSheetData() {
-      try {
-        const response = await fetch(SHEET_CSV_URL + "&cachebust=" + new Date().getTime());
-        const text = await response.text();
-        const rows = text.trim().split("\n").map(row => row.split(","));
-        renderTable(rows);
-        document.getElementById("status").innerText = `Last updated: ${new Date().toLocaleTimeString()}`;
-      } catch (err) {
-        console.error(err);
-        document.getElementById("status").innerText = "Error loading data";
-      }
+    // Helper to fetch public sheet data via Google Visualization API
+    async function fetchSheet(spreadsheetId, sheetName){
+      const sheetParam = sheetName ? '&sheet=' + encodeURIComponent(sheetName) : '';
+      const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json${sheetParam}`;
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('Network error: ' + res.status);
+      const text = await res.text();
+      // The response is JS that wraps JSON in a function call. Extract the JSON payload.
+      const match = text.match(/google\.visualization\.Query\.setResponse\((.*)\);/s);
+      if(!match) throw new Error('Unexpected response format from Google Sheets');
+      return JSON.parse(match[1]);
     }
 
-    function renderTable(data) {
-      const table = document.getElementById("stockTable");
-      table.innerHTML = "";
+    function renderTable(googleResponse){
+      const container = document.getElementById('tableContainer');
+      container.innerHTML = '';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
 
-      data.forEach((row, rowIndex) => {
-        const tr = document.createElement("tr");
-        row.forEach(cell => {
-          const el = rowIndex === 0 ? document.createElement("th") : document.createElement("td");
-          el.textContent = cell;
-          tr.appendChild(el);
-        });
-        table.appendChild(tr);
+      const cols = googleResponse.table.cols || [];
+      const rows = googleResponse.table.rows || [];
+
+      // Header
+      const trHead = document.createElement('tr');
+      cols.forEach(c => {
+        const th = document.createElement('th');
+        th.textContent = c && c.label ? c.label : (c && c.id ? c.id : '');
+        trHead.appendChild(th);
       });
+      thead.appendChild(trHead);
+
+      // Rows
+      rows.forEach(r => {
+        const tr = document.createElement('tr');
+        r.c.forEach(cell => {
+          const td = document.createElement('td');
+          td.textContent = (cell && cell.v != null) ? cell.v : '';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      container.appendChild(table);
     }
 
-    fetchSheetData();
-    setInterval(fetchSheetData, REFRESH_INTERVAL_MS);
+    document.getElementById('load').addEventListener('click', async () => {
+      const id = document.getElementById('sheetId').value.trim();
+      const sheet = document.getElementById('sheetName').value.trim();
+      const errorEl = document.getElementById('error');
+      errorEl.textContent = '';
+      document.getElementById('tableContainer').innerHTML = '';
+      if(!id){ errorEl.textContent = 'Please enter a Spreadsheet ID.'; return; }
+      try{
+        const resp = await fetchSheet(id, sheet);
+        if(resp && resp.table && resp.table.rows && resp.table.rows.length){
+          renderTable(resp);
+        } else {
+          document.getElementById('tableContainer').textContent = 'No data found.';
+        }
+      }catch(err){
+        errorEl.textContent = 'Error: ' + err.message;
+      }
+    });
+
+    // Optional: load sample if hash present (#id=SPREADSHEET_ID&sheet=Sheet1)
+    (function(){
+      const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+      if(params.get('id')){
+        document.getElementById('sheetId').value = params.get('id');
+        if(params.get('sheet')) document.getElementById('sheetName').value = params.get('sheet');
+        document.getElementById('load').click();
+      }
+    })();
   </script>
 </body>
 </html>
